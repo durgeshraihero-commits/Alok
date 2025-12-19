@@ -1,6 +1,8 @@
 import os
 import json
 import requests
+import asyncio
+from aiohttp import web
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
@@ -9,12 +11,10 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 API_KEY = os.getenv("OSINT_API_KEY")
 API_ROOT = "https://relay-wzlz.onrender.com"
 REQUEST_TIMEOUT = 25
+PORT = int(os.getenv("PORT", 10000))  # Render provides this
 
 if not BOT_TOKEN or not API_KEY:
     raise RuntimeError("BOT_TOKEN or OSINT_API_KEY not set")
-
-# Optional user restriction
-# ALLOWED_USERS = {123456789}
 
 # ================= API =================
 def call_api(command: str) -> dict:
@@ -31,7 +31,6 @@ def call_api(command: str) -> dict:
 # ================= FORMATTER =================
 def format_response(text: str) -> str:
     text = text.replace("```json", "").replace("```", "").strip()
-
     try:
         data = json.loads(text)
         return format_dict(data)
@@ -62,19 +61,16 @@ def format_dict(data, indent=0):
 # ================= HANDLERS =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🕵️ *OSINT Bot Online*\n\n"
-        "Available Commands:\n"
+        "🕵️ OSINT Bot Online\n\n"
         "/num <number>\n"
         "/ip <ip>\n"
         "/insta <username>\n"
         "/tg <username>\n"
         "/gst <gst>\n"
-        "/ff <id>\n\n"
-        "_Use responsibly_",
-        parse_mode="Markdown"
+        "/ff <id>"
     )
 
-async def osint_command(update: Update, context: ContextTypes.DEFAULT_TYPE, token: str):
+async def osint_command(update, context, token: str):
     if not context.args:
         await update.message.reply_text("❌ Missing argument")
         return
@@ -83,7 +79,6 @@ async def osint_command(update: Update, context: ContextTypes.DEFAULT_TYPE, toke
     cmd = f"2/{token} {query}"
 
     msg = await update.message.reply_text("🔍 Processing...")
-
     result = call_api(cmd)
 
     if not result.get("ok"):
@@ -91,43 +86,54 @@ async def osint_command(update: Update, context: ContextTypes.DEFAULT_TYPE, toke
         return
 
     body = result["json"]
-
     if body.get("success"):
         output = []
         for r in body.get("responses", []):
             formatted = format_response(r)
-            if isinstance(formatted, list):
-                output.extend(formatted)
-            else:
-                output.append(formatted)
+            output.extend(formatted if isinstance(formatted, list) else [formatted])
 
-        text = "\n".join(output)[:4000]
-        await msg.edit_text(f"```\n{text}\n```", parse_mode="Markdown")
+        await msg.edit_text(f"```\n{chr(10).join(output)[:4000]}\n```", parse_mode="Markdown")
     else:
         await msg.edit_text("❌ No data found")
 
-# ===== INDIVIDUAL COMMANDS =====
-async def num(update, context): await osint_command(update, context, "num")
-async def ip(update, context): await osint_command(update, context, "ip")
-async def insta(update, context): await osint_command(update, context, "insta")
-async def tg(update, context): await osint_command(update, context, "tg")
-async def gst(update, context): await osint_command(update, context, "gst")
-async def ff(update, context): await osint_command(update, context, "ff")
+# ===== COMMAND WRAPPERS =====
+async def num(u, c): await osint_command(u, c, "num")
+async def ip(u, c): await osint_command(u, c, "ip")
+async def insta(u, c): await osint_command(u, c, "insta")
+async def tg(u, c): await osint_command(u, c, "tg")
+async def gst(u, c): await osint_command(u, c, "gst")
+async def ff(u, c): await osint_command(u, c, "ff")
+
+# ================= WEB SERVER (RENDER PORT) =================
+async def health(request):
+    return web.Response(text="OK")
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get("/", health)
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    await site.start()
+
+    print(f"🌐 Web server running on port {PORT}")
 
 # ================= MAIN =================
-def main():
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+async def main():
+    await start_web_server()
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("num", num))
-    app.add_handler(CommandHandler("ip", ip))
-    app.add_handler(CommandHandler("insta", insta))
-    app.add_handler(CommandHandler("tg", tg))
-    app.add_handler(CommandHandler("gst", gst))
-    app.add_handler(CommandHandler("ff", ff))
+    bot = ApplicationBuilder().token(BOT_TOKEN).build()
+    bot.add_handler(CommandHandler("start", start))
+    bot.add_handler(CommandHandler("num", num))
+    bot.add_handler(CommandHandler("ip", ip))
+    bot.add_handler(CommandHandler("insta", insta))
+    bot.add_handler(CommandHandler("tg", tg))
+    bot.add_handler(CommandHandler("gst", gst))
+    bot.add_handler(CommandHandler("ff", ff))
 
-    print("🤖 OSINT Telegram Bot Running...")
-    app.run_polling()
+    print("🤖 OSINT Bot Running (Polling)")
+    await bot.run_polling()
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
